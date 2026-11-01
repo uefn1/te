@@ -1,4 +1,4 @@
-name: YouTube Playlist -> Opus (No Login / No Zip)
+name: YouTube Playlist -> Opus (Go Embedded / No Zip)
 
 on:
   workflow_dispatch:
@@ -16,46 +16,121 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22' }
       - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
+        with: { deno-version: v2.x }
 
       - name: Install tools
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          python -m pip install -U pip
           python -m pip install -U https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz
           python -m pip install -U bgutil-ytdlp-pot-provider
-          mkdir -p audio .yt-dlp-cache
-          touch .yt-dlp-cache/archive.txt
-          yt-dlp --version
-          ffmpeg -version
+          mkdir -p audio
 
-      - name: Download - Opus best quality (no login)
+      - name: Run embedded Go
+        env:
+          PLAYLIST_URL: ${{ inputs.playlist_url }}
         run: |
-          yt-dlp \
-            --extractor-args "youtube:player_client=android,ios,mweb,web;po_token=auto" \
-            --extractor-args "youtubepot:bgutil:enable=true" \
-            --sleep-requests 1 --sleep-interval 2 --sleep-subtitles 1 \
-            --ignore-errors \
-            --retries 10 --fragment-retries 10 --concurrent-fragments 4 \
-            -f "bestaudio[acodec=opus]/bestaudio/best" \
-            -x --audio-format opus --audio-quality 0 \
-            --embed-metadata --embed-thumbnail --embed-chapters \
-            --download-archive .yt-dlp-cache/archive.txt \
-            -o "audio/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s" \
-            "${{ inputs.playlist_url }}"
-          ls -lh audio
+          cat > go.mod <<'EOF'
+          module youtube-opus
+          go 1.22
+          require github.com/chromedp/chromedp v0.11.0
+          EOF
 
-      - name: Create Release
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+            "context"
+            "fmt"
+            "log"
+            "os"
+            "os/exec"
+            "time"
+            "github.com/chromedp/chromedp"
+          )
+
+          func genCookies() error {
+            ctx, cancel := chromedp.NewContext(context.Background())
+            defer cancel()
+            ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
+            defer cancel()
+
+            var cookies []*chromedp.Cookie
+            err := chromedp.Run(ctx,
+              chromedp.Navigate("https://www.youtube.com/"),
+              chromedp.Sleep(8*time.Second),
+              chromedp.ActionFunc(func(ctx context.Context) error {
+                c, err := chromedp.Cookies().Do(ctx)
+                if err != nil {
+                  return err
+                }
+                cookies = c
+                return nil
+              }),
+            )
+            if err != nil {
+              return err
+            }
+            f, _ := os.Create("cookies.txt")
+            f.WriteString("# Netscape HTTP Cookie File\n")
+            for _, c := range cookies {
+              flag := "FALSE"
+              if len(c.Domain) > 0 && c.Domain[0] == '.' {
+                flag = "TRUE"
+              }
+              secure := "FALSE"
+              if c.Secure {
+                secure = "TRUE"
+              }
+              expires := int64(c.Expires)
+              if expires < 0 {
+                expires = 0
+              }
+              fmt.Fprintf(f, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+                c.Domain, flag, c.Path, secure, expires, c.Name, c.Value)
+            }
+            f.Close()
+            log.Printf("Saved %d cookies", len(cookies))
+            return nil
+          }
+
+          func main() {
+            playlist := os.Getenv("PLAYLIST_URL")
+            if playlist == "" {
+              log.Fatal("PLAYLIST_URL required")
+            }
+            if err := genCookies(); err != nil {
+              log.Fatalf("cookie gen failed: %v", err)
+            }
+            cmd := exec.Command("yt-dlp",
+              "--cookies", "cookies.txt",
+              "--extractor-args", "youtube:player_client=android,ios,web_safari,web;po_token=auto;lang=en;hl=en;gl=US",
+              "--extractor-args", "youtubepot:bgutil:enable=true",
+              "--add-header", "Accept-Language:en-US,en;q=0.9",
+              "--ignore-errors", "--retries", "10", "--fragment-retries", "10", "--concurrent-fragments", "4",
+              "-f", "bestaudio[acodec=opus]/bestaudio/best",
+              "-x", "--audio-format", "opus", "--audio-quality", "0",
+              "--embed-metadata", "--embed-thumbnail",
+              "-o", "audio/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s",
+              playlist,
+            )
+            cmd.Stdout = os.Stdout
+            cmd.Stderr = os.Stderr
+            if err := cmd.Run(); err != nil {
+              log.Fatalf("yt-dlp failed: %v", err)
+            }
+          }
+          EOF
+
+          go mod tidy
+          go run .
+
+      - name: Create Release - individual opus no zip
         uses: softprops/action-gh-release@v2
         with:
           tag_name: opus-${{ github.run_number }}
           name: opus-${{ github.run_number }}
-          body: Source ${{ inputs.playlist_url }} / no-login auto PO token
+          body: Source ${{ inputs.playlist_url }}
           files: audio/*.opus
