@@ -1,0 +1,102 @@
+name: YouTube Playlist -> Opus Release (Complete / No Zip)
+
+on:
+  workflow_dispatch:
+    inputs:
+      playlist_url:
+        description: 'YouTubeプレイリストのURL'
+        required: true
+        type: string
+      release_tag:
+        description: 'Releaseタグ名 (空なら自動生成)'
+        required: false
+        type: string
+      draft:
+        description: 'Draft Releaseにするか'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: youtube-opus-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache download archive
+        uses: actions/cache@v4
+        with:
+          path: .yt-dlp-cache
+          key: ytdlp-${{ hashFiles('.yt-dlp-cache/archive.txt') }}
+          restore-keys: ytdlp-
+
+      - name: Install yt-dlp
+        run: |
+          python -m pip install -U yt-dlp
+          mkdir -p audio .yt-dlp-cache
+          touch .yt-dlp-cache/archive.txt
+          ffmpeg -version
+          yt-dlp --version
+
+      - name: Prepare cookies (private playlist用・任意)
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          if [ -n "$YT_COOKIES" ]; then
+            echo "$YT_COOKIES" > cookies.txt
+            echo "cookies.txt created"
+          fi
+
+      - name: Download - Opus best quality
+        run: |
+          COOKIE_ARG=""
+          if [ -f cookies.txt ]; then COOKIE_ARG="--cookies cookies.txt"; fi
+
+          yt-dlp \
+            --ignore-errors \
+            --retries 10 --fragment-retries 10 --concurrent-fragments 4 \
+            -f "bestaudio[acodec=opus]/bestaudio/best" \
+            -x --audio-format opus --audio-quality 0 \
+            --embed-metadata --embed-thumbnail --embed-chapters \
+            --download-archive .yt-dlp-cache/archive.txt \
+            -o "audio/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s" \
+            $COOKIE_ARG \
+            "${{ inputs.playlist_url }}"
+
+          echo "### Result" >> $GITHUB_STEP_SUMMARY
+          ls -lh audio >> $GITHUB_STEP_SUMMARY
+          du -sh audio >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=opus-$(date +%Y%m%d)-${{ github.run_number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release (individual .opus files, no zip)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          draft: ${{ inputs.draft }}
+          body: |
+            Source: ${{ inputs.playlist_url }}
+            Format: opus best quality (YouTube 251 / 160kbps - 再エンコード無し)
+            VLCでそのまま再生可能
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: audio/*.opus
+          fail_on_unmatched_files: true
