@@ -19,7 +19,6 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: '1.22' }
       - uses: denoland/setup-deno@v2
-        with: { deno-version: v2.x }
 
       - name: Install tools
         run: |
@@ -48,26 +47,24 @@ jobs:
             "os"
             "os/exec"
             "time"
+            "github.com/chromedp/cdproto/network"
             "github.com/chromedp/chromedp"
           )
 
           func genCookies() error {
             ctx, cancel := chromedp.NewContext(context.Background())
             defer cancel()
-            ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
+            ctx, cancel = context.WithTimeout(ctx, 90*time.Second)
             defer cancel()
 
-            var cookies []*chromedp.Cookie
+            var cookies []*network.Cookie
             err := chromedp.Run(ctx,
               chromedp.Navigate("https://www.youtube.com/"),
               chromedp.Sleep(8*time.Second),
               chromedp.ActionFunc(func(ctx context.Context) error {
-                c, err := chromedp.Cookies().Do(ctx)
-                if err != nil {
-                  return err
-                }
-                cookies = c
-                return nil
+                var err error
+                cookies, err = network.GetCookies().Do(ctx)
+                return err
               }),
             )
             if err != nil {
@@ -127,10 +124,8 @@ jobs:
           go mod tidy
           go run .
 
-      - name: Create Release - individual opus no zip
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: opus-${{ github.run_number }}
-          name: opus-${{ github.run_number }}
-          body: Source ${{ inputs.playlist_url }}
           files: audio/*.opus
