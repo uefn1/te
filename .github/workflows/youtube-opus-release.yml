@@ -1,4 +1,4 @@
-name: YouTube Playlist -> Opus Release (Complete / No Zip)
+name: YouTube Playlist -> Opus Release (Auto Cookie / No Zip)
 
 on:
   workflow_dispatch:
@@ -8,18 +8,9 @@ on:
         required: true
         type: string
       release_tag:
-        description: 'Releaseタグ名 (空なら自動生成)'
+        description: 'Releaseタグ (空なら自動)'
         required: false
         type: string
-      draft:
-        description: 'Draft Releaseにするか'
-        required: false
-        default: false
-        type: boolean
-
-concurrency:
-  group: youtube-opus-release
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -29,38 +20,66 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Cache download archive
-        uses: actions/cache@v4
+      - uses: denoland/setup-deno@v2
         with:
-          path: .yt-dlp-cache
-          key: ytdlp-${{ hashFiles('.yt-dlp-cache/archive.txt') }}
-          restore-keys: ytdlp-
+          deno-version: v2.x
 
       - name: Install tools
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          python -m pip install -U yt-dlp
+          python -m pip install -U yt-dlp playwright
+          playwright install chromium --with-deps --no-shell
           mkdir -p audio .yt-dlp-cache
           touch .yt-dlp-cache/archive.txt
-          ffmpeg -version
-          yt-dlp --version
 
-      - name: Prepare cookies (private playlist用・任意)
-        env:
-          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+      - name: Auto generate cookies.txt via Playwright
         run: |
-          if [ -n "$YT_COOKIES" ]; then echo "$YT_COOKIES" > cookies.txt; fi
+          cat > gen_cookies.py << 'PY'
+          import time
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              context = browser.new_context(
+                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+              )
+              page = context.new_page()
+              page.goto("https://www.youtube.com/", wait_until="domcontentloaded", timeout=60000)
+              # 同意ダイアログを適当に閉じる
+              for txt in ["Accept all", "すべて同意する", "同意する"]:
+                  try:
+                      page.get_by_role("button", name=txt).click(timeout=2000)
+                      break
+                  except:
+                      pass
+              time.sleep(5)
+              cookies = context.cookies()
+              with open("cookies.txt", "w", encoding="utf-8") as f:
+                  f.write("# Netscape HTTP Cookie File\n")
+                  for c in cookies:
+                      domain = c['domain']
+                      flag = "TRUE" if domain.startswith(".") else "FALSE"
+                      path = c['path']
+                      secure = "TRUE" if c['secure'] else "FALSE"
+                      expires = str(int(c['expires'])) if c['expires']>0 else "0"
+                      f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{c['name']}\t{c['value']}\n")
+              print(f"Saved {len(cookies)} cookies to cookies.txt")
+              browser.close()
+          PY
+          python gen_cookies.py
+          cat cookies.txt
 
       - name: Download - Opus best quality
         run: |
-          COOKIE_ARG=""
-          if [ -f cookies.txt ]; then COOKIE_ARG="--cookies cookies.txt"; fi
-
           yt-dlp \
+            --cookies cookies.txt \
+            --extractor-args "youtube:player_client=android,web" \
+            --sleep-requests 1 --sleep-interval 2 \
             --ignore-errors \
             --retries 10 --fragment-retries 10 --concurrent-fragments 4 \
             -f "bestaudio[acodec=opus]/bestaudio/best" \
@@ -68,27 +87,19 @@ jobs:
             --embed-metadata --embed-thumbnail --embed-chapters \
             --download-archive .yt-dlp-cache/archive.txt \
             -o "audio/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s" \
-            $COOKIE_ARG \
             "${{ inputs.playlist_url }}"
+          ls -lh audio
 
       - name: Generate tag
         id: tag
         run: |
-          if [ -n "${{ inputs.release_tag }}" ]; then
-            echo "tag=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=opus-$(date +%Y%m%d)-${{ github.run_number }}" >> $GITHUB_OUTPUT
-          fi
+          if [ -n "${{ inputs.release_tag }}" ]; then echo "tag=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
+          else echo "tag=opus-$(date +%Y%m%d)-${{ github.run_number }}" >> $GITHUB_OUTPUT; fi
 
-      - name: Create Release (individual .opus files, no zip)
+      - name: Create Release (individual .opus, no zip)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
-          draft: ${{ inputs.draft }}
-          body: |
-            Source: ${{ inputs.playlist_url }}
-            Format: opus best quality (251 / 160kbps)
-            VLCでそのまま再生可能
+          body: Source ${{ inputs.playlist_url }} / auto-cookie + android client + PO token
           files: audio/*.opus
-          fail_on_unmatched_files: true
