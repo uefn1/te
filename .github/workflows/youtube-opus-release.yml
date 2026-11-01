@@ -29,7 +29,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -41,8 +40,9 @@ jobs:
           key: ytdlp-${{ hashFiles('.yt-dlp-cache/archive.txt') }}
           restore-keys: ytdlp-
 
-      - name: Install yt-dlp
+      - name: Install tools
         run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
           python -m pip install -U yt-dlp
           mkdir -p audio .yt-dlp-cache
           touch .yt-dlp-cache/archive.txt
@@ -53,10 +53,7 @@ jobs:
         env:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
-          if [ -n "$YT_COOKIES" ]; then
-            echo "$YT_COOKIES" > cookies.txt
-            echo "cookies.txt created"
-          fi
+          if [ -n "$YT_COOKIES" ]; then echo "$YT_COOKIES" > cookies.txt; fi
 
       - name: Download - Opus best quality
         run: |
@@ -73,10 +70,6 @@ jobs:
             -o "audio/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s" \
             $COOKIE_ARG \
             "${{ inputs.playlist_url }}"
-
-          echo "### Result" >> $GITHUB_STEP_SUMMARY
-          ls -lh audio >> $GITHUB_STEP_SUMMARY
-          du -sh audio >> $GITHUB_STEP_SUMMARY
 
       - name: Generate tag
         id: tag
@@ -95,8 +88,7 @@ jobs:
           draft: ${{ inputs.draft }}
           body: |
             Source: ${{ inputs.playlist_url }}
-            Format: opus best quality (YouTube 251 / 160kbps - 再エンコード無し)
+            Format: opus best quality (251 / 160kbps)
             VLCでそのまま再生可能
-            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           files: audio/*.opus
           fail_on_unmatched_files: true
